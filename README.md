@@ -1,11 +1,11 @@
-# 🦞wxClawDaemon
+# 🦞 wxClawDaemon
 
 <p align="center">
-  <img src="./banner.jpg" alt="wxclaw_daemon banner" width="760" />
+  <img src="./banner.jpg" alt="wxclaw_daemon banner" width="450" />
 </p>
 
 <p align="center">
-  企业微信回调地址与可信 IP 自动化守护进程（含浏览器扩展联动）
+  本地openclaw企业微信应用channel网络穿透的自动化守护进程（含浏览器扩展联动）
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
 
 ## ✨ 项目简介
 
-`wxclaw_daemon` 是一个“桌面守护进程 + Chrome 扩展”协同应用，用于自动维护openclaw企业微信后台配置，核心目标是：
+`wxClawDaemon` 是一个“桌面守护进程 + Chrome 扩展”协同应用，用于自动维护openclaw企业微信channel的网络穿透状态，核心目标是：
 
 - 自动管理公网访问入口（cloudflared 隧道）
 - 自动发现并同步可信 IP 变化
@@ -37,12 +37,6 @@ Daemon(NodeGui + WS)  <----WebSocket---->  Chrome Extension(MV3)
 cloudflared Tunnel                         WeCom Admin Console（企业微信后台）
 
 ```
-
-## 🖼️ 界面预览
-
-<p align="center">
-  <img src="./screenshot.png" alt="wxclaw_daemon screenshot" width="760" />
-</p>
 
 ## 🚀 快速开始
 
@@ -80,6 +74,11 @@ wxclaw_daemon/
 ├─ daemon/        # 守护进程（NodeGui、WS、隧道与打包）
 └─ extension/     # Chrome Extension（MV3，页面自动化逻辑）
 ```
+## 🖼️ 界面预览
+
+<p align="center">
+  <img src="screenshot.jpg" alt="wxclaw_daemon screenshot" width="400" />
+</p>
 
 ## ⚙️ 运行提示
 
