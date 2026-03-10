@@ -1,0 +1,8 @@
+# config.yml
+ingress:
+  # wxapp api
+  - path: /wecom/callback.*
+    service: http://localhost:18789
+
+  # other ret 404
+  - service: http_status:404

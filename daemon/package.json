@@ -1,0 +1,30 @@
+{
+  "name": "daemon",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "qode index.js",
+    "start:dist": "qode dist/main.js",
+    "build": "echo \"No build step\"",
+    "package": "jam-pack-nodegui --config jam-pack-nodegui.json",
+    "build:dist": "esbuild index.js --bundle --loader:.png=file --minify --packages=external --outfile=dist/main.js --platform=node --format=esm --external:@nodegui/nodegui --external:nodegui-plugin-*",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@nodegui/nodegui": "^0.74.0",
+    "axios": "^1.13.6",
+    "lockfile": "^1.0.4",
+    "open": "^11.0.0",
+    "winston": "^3.19.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.3",
+    "jam-pack-nodegui": "^0.20.1"
+  }
+}

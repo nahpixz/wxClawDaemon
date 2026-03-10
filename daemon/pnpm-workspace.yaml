@@ -1,0 +1,5 @@
+onlyBuiltDependencies:
+  - '@nodegui/nodegui'
+  - '@nodegui/packer'
+  - '@nodegui/qode'
+  - esbuild
