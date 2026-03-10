@@ -9,9 +9,7 @@ import winston from 'winston';
 import * as gui from './gui.js';
 
 const STORE_DEFAULTS = {
-    wxAppId: undefined,
-    usingIp: '',
-    usingTunnelUrl: '',
+    wxAppId: '',
     fallBackWebhookUrl: '',
     // wxApiUrl:'/wecom/callback',
     // openclawHost:'127.0.0.1',
@@ -24,38 +22,56 @@ const STORE_DEFAULTS = {
 }
 
 const STORE_DIR = path.join(process.env.APPDATA || process.cwd(), 'wxclaw_daemon');
-const STORE_FILE = path.join(STORE_DIR, 'config.json');
+const CONFIG_FILE = path.join(STORE_DIR, 'config.json');
+const STATE_FILE = path.join(STORE_DIR, 'state.json');
+const LOG_FILE = path.join(STORE_DIR, 'daemon.log');
 
-function persistStore() {
-    fs.mkdirSync(STORE_DIR, { recursive: true });
-    const tempFile = `${STORE_FILE}.tmp`;
-    fs.writeFileSync(tempFile, `${JSON.stringify(STORE, null, 2)}\n`, 'utf8');
-    fs.renameSync(tempFile, STORE_FILE);
-}
-
-function loadStore() {
+function loadConfig() {
     try {
         fs.mkdirSync(STORE_DIR, { recursive: true });
-        if (!fs.existsSync(STORE_FILE)) {
+        if (!fs.existsSync(CONFIG_FILE)) {
             return { ...STORE_DEFAULTS };
         }
-        const content = fs.readFileSync(STORE_FILE, 'utf8');
+        const content = fs.readFileSync(CONFIG_FILE, 'utf8');
         const parsed = JSON.parse(content);
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            return { ...STORE_DEFAULTS };
-        }
         return { ...STORE_DEFAULTS, ...parsed };
     } catch (error) {
-        console.error(`Failed to load store file ${STORE_FILE}: ${error.message}`);
+        console.error(`Failed to load config file ${CONFIG_FILE}: ${error.message}`);
         return { ...STORE_DEFAULTS };
     }
 }
 
-const STORE = loadStore();
-try {
-    persistStore();
-} catch (error) {
-    console.error(`Failed to initialize store file ${STORE_FILE}: ${error.message}`);
+const STORE = loadConfig();
+
+// Persistent State (usingIp, usingTunnelUrl)
+const STATE_DEFAULTS = {
+    usingIp: '',
+    usingTunnelUrl: ''
+};
+
+function loadState() {
+    try {
+        if (!fs.existsSync(STATE_FILE)) {
+            return { ...STATE_DEFAULTS };
+        }
+        const content = fs.readFileSync(STATE_FILE, 'utf8');
+        return { ...STATE_DEFAULTS, ...JSON.parse(content) };
+    } catch (error) {
+        console.error(`Failed to load state file: ${error.message}`);
+        return { ...STATE_DEFAULTS };
+    }
+}
+
+const PERSISTENT_STATE = loadState();
+
+function persistState() {
+    try {
+        const tempFile = `${STATE_FILE}.tmp`;
+        fs.writeFileSync(tempFile, JSON.stringify(PERSISTENT_STATE, null, 2), 'utf8');
+        fs.renameSync(tempFile, STATE_FILE);
+    } catch (error) {
+        logger.error(`Failed to persist state: ${error.message}`);
+    }
 }
 const CLAW_URL = `http://${STORE.openclawHost||'127.0.0.1'}:${STORE.openclawPort||18789}${STORE.wxApiUrl||'/wecom/callback'}`;
 // Configuration
@@ -87,7 +103,7 @@ const logger = winston.createLogger({
     ),
     transports: [
         new winston.transports.Console(),
-        new winston.transports.File({ filename: 'daemon.log' })
+        new winston.transports.File({ filename: LOG_FILE })
     ]
 });
 
@@ -100,6 +116,25 @@ let state = {
     browserConnected: false,
     lastBrowserHeartbeat: Date.now()
 };
+
+async function openConfigDirectory(dirPath) {
+    if (!dirPath) return false;
+    try {
+        if (process.platform === 'win32') {
+            const child = spawn('explorer.exe', [dirPath], {
+                detached: true,
+                stdio: 'ignore'
+            });
+            child.unref();
+            return true;
+        }
+        await open(dirPath, { wait: false });
+        return true;
+    } catch (error) {
+        logger.error(`Failed to open config directory: ${error.message}`);
+        return false;
+    }
+}
 
 async function sendFallbackLoginScreenshot(base64Image) {
     if (!STORE.fallBackWebhookUrl) {
@@ -128,6 +163,118 @@ async function sendFallbackLoginScreenshot(base64Image) {
     logger.info('Login screenshot sent to fallback webhook.');
 }
 
+async function handleLoginQrcodeUrl(url) {
+    if (!STORE.fallBackWebhookUrl) {
+        logger.warn('fallBackWebhookUrl is not configured, skipping QR code download.');
+        return;
+    }
+    if (!url || !url.startsWith('http')) {
+        logger.warn(`Invalid QR code URL: ${url}`);
+        return;
+    }
+
+    try {
+        logger.info(`Downloading QR code from ${url}...`);
+        // Add timestamp to prevent caching if needed, though usually unique per session
+        const response = await axios.get(url, {
+            responseType: 'arraybuffer',
+            timeout: 10000
+        });
+
+        const imageBuffer = Buffer.from(response.data);
+        const base64 = imageBuffer.toString('base64');
+        const md5 = crypto.createHash('md5').update(imageBuffer).digest('hex');
+
+        await axios.post(STORE.fallBackWebhookUrl, {
+            msgtype: 'image',
+            image: {
+                base64: base64,
+                md5
+            }
+        }, {
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            timeout: 10000
+        });
+        logger.info('Login QR code downloaded and sent to fallback webhook.');
+    } catch (error) {
+        logger.error(`Failed to process QR code URL: ${error.message}`);
+    }
+}
+
+async function sendFallbackTextNotify(content) {
+    if (!STORE.fallBackWebhookUrl) {
+        logger.warn('fallBackWebhookUrl is not configured, skipping text notify forward.');
+        return;
+    }
+    if (!content || typeof content !== 'string') return;
+
+    await axios.post(STORE.fallBackWebhookUrl, {
+        msgtype: 'text',
+        text: {
+            content: content
+        }
+    }, {
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        timeout: 10000
+    });
+    logger.info(`Text notify sent to fallback webhook: ${content}`);
+}
+
+function getOpenClients() {
+    if (!state.wsServer) return [];
+    return Array.from(state.wsServer.clients).filter((client) => client.readyState === WebSocket.OPEN);
+}
+
+function sendToClients(payload, predicate = () => true) {
+    const message = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    getOpenClients().forEach((client) => {
+        if (predicate(client)) {
+            client.send(message);
+        }
+    });
+}
+
+function sendToConnectedPageClients(payload) {
+    sendToClients(payload, (client) => client.pageStatus === 'connected');
+}
+
+function applyExtensionStatus(status) {
+    if (status === 'connected') {
+        gui.updateExtensionStatus(gui.ExtensionStatus.CONNECTED);
+        return;
+    }
+    if (status === 'login_needed') {
+        gui.updateExtensionStatus(gui.ExtensionStatus.LOGIN_NEEDED);
+        return;
+    }
+    if (status === 'other_page' || status === 'active') {
+        gui.updateExtensionStatus(gui.ExtensionStatus.OTHER_PAGE);
+        return;
+    }
+    gui.updateExtensionStatus(gui.ExtensionStatus.DISCONNECTED);
+}
+
+function sendConfigureIp(ip) {
+    if (!ip) return;
+    sendToConnectedPageClients({
+        type: 'configure_ip',
+        ip
+    });
+}
+
+function sendConfigureTunnel(tunnelDomain) {
+    if (!tunnelDomain) return;
+    sendToConnectedPageClients({
+        type: 'configure_tunnel',
+        tunnelDomain,
+        fullUrl: `https://${tunnelDomain}${CONFIG.wxApiUrl}`
+    });
+}
+
 // WebSocket Server & Browser Communication
 function startWsServer() {
     return new Promise((resolve, reject) => {
@@ -150,13 +297,7 @@ function startWsServer() {
             state.wsServer.on('connection', (ws) => {
                 logger.info('Browser extension connected.');
                 state.browserConnected = true;
-                // Don't set status immediately, wait for status report from client
-                // gui.updateExtensionStatus(gui.ExtensionStatus.CONNECTED);
-                
-                // Track client status
                 ws.pageStatus = 'unknown';
-                
-                // Send initial state
                 ws.send(JSON.stringify({
                     type: 'init',
                     ip: state.currentIp,
@@ -166,46 +307,54 @@ function startWsServer() {
                 ws.on('message', (message) => {
                     try {
                         const msg = JSON.parse(message);
-                        if (msg.type === 'heartbeat') {
-                            state.lastBrowserHeartbeat = Date.now();
-                        } else if (msg.type === 'status') {
-                            ws.pageStatus = msg.status;
-                            logger.info(`Browser status changed: ${msg.status} (URL: ${msg.url || 'unknown'})`);
-                            
-                            // Map client status to GUI status
-                            if (msg.status === 'connected') {
-                                gui.updateExtensionStatus(gui.ExtensionStatus.CONNECTED);
-                                // Check config mismatch on connect
-                                checkConfigMismatch();
-                            } else if (msg.status === 'login_needed') {
-                                gui.updateExtensionStatus(gui.ExtensionStatus.LOGIN_NEEDED);
-                            } else if (msg.status === 'other_page') {
-                                gui.updateExtensionStatus(gui.ExtensionStatus.OTHER_PAGE);
-                            } else if (msg.status === 'active') {
-                                // Generic active, maybe fallback
-                                gui.updateExtensionStatus(gui.ExtensionStatus.OTHER_PAGE);
-                            }
-                        } else if (msg.type === 'config_success') {
-                            if (msg.configType === 'ip') {
-                                logger.info(`IP configuration success reported by client. Updating STORE: ${STORE.usingIp} -> ${msg.value}`);
-                                STORE.usingIp = msg.value;
-                                persistStore();
-                                gui.updateIpConfigStatus(STORE.usingIp, state.currentIp);
-                            } else if (msg.configType === 'tunnel') {
-                                logger.info(`Tunnel configuration success reported by client. Updating STORE: ${STORE.usingTunnelUrl} -> ${msg.domain}`);
-                                STORE.usingTunnelUrl = msg.domain;
-                                persistStore();
-                                gui.updateTunnelConfigStatus(STORE.usingTunnelUrl, state.currentTunnelUrl);
-                            }
-                        } else if (msg.type === 'config_error') {
-                            logger.warn(`Configuration error reported by client (${msg.configType}): ${msg.error}`);
-                            if (msg.configType === 'tunnel') {
-                                gui.updateTunnelConfigError(msg.error);
-                            }
-                        } else if (msg.type === 'login_screenshot') {
-                            sendFallbackLoginScreenshot(msg.base64).catch((error) => {
-                                logger.error(`Failed to send login screenshot: ${error.message}`);
-                            });
+                        switch (msg.type) {
+                            case 'heartbeat':
+                                state.lastBrowserHeartbeat = Date.now();
+                                break;
+                            case 'status':
+                                ws.pageStatus = msg.status;
+                                logger.info(`Browser status changed: ${msg.status} (URL: ${msg.url || 'unknown'})`);
+                                applyExtensionStatus(msg.status);
+                                if (msg.status === 'connected') {
+                                    checkConfigMismatch();
+                                }
+                                break;
+                            case 'config_success':
+                                if (msg.configType === 'ip') {
+                                    logger.info(`IP configuration success reported by client. Updating STORE: ${PERSISTENT_STATE.usingIp} -> ${msg.value}`);
+                                    PERSISTENT_STATE.usingIp = msg.value;
+                                    persistState();
+                                    gui.updateIpConfigStatus(PERSISTENT_STATE.usingIp, state.currentIp);
+                                } else if (msg.configType === 'tunnel') {
+                                    logger.info(`Tunnel configuration success reported by client. Updating STORE: ${PERSISTENT_STATE.usingTunnelUrl} -> ${msg.domain}`);
+                                    PERSISTENT_STATE.usingTunnelUrl = msg.domain;
+                                    persistState();
+                                    gui.updateTunnelConfigStatus(PERSISTENT_STATE.usingTunnelUrl, state.currentTunnelUrl);
+                                }
+                                break;
+                            case 'config_error':
+                                logger.warn(`Configuration error reported by client (${msg.configType}): ${msg.error}`);
+                                if (msg.configType === 'tunnel') {
+                                    gui.updateTunnelConfigError(msg.error);
+                                }
+                                break;
+                            case 'login_screenshot':
+                                sendFallbackLoginScreenshot(msg.base64).catch((error) => {
+                                    logger.error(`Failed to send login screenshot: ${error.message}`);
+                                });
+                                break;
+                            case 'login_qrcode_url':
+                                handleLoginQrcodeUrl(msg.url).catch((error) => {
+                                    logger.error(`Failed to handle QR code URL: ${error.message}`);
+                                });
+                                break;
+                            case 'text_notify':
+                                sendFallbackTextNotify(msg.text).catch((error) => {
+                                    logger.error(`Failed to send text notify: ${error.message}`);
+                                });
+                                break;
+                            default:
+                                break;
                         }
                     } catch (e) {
                         logger.error('Error parsing WS message', e);
@@ -219,9 +368,7 @@ function startWsServer() {
                     // If a new connection comes in within this window, we can ignore the disconnect.
                     setTimeout(() => {
                          // Check if there are other connected clients
-                        const activeClients = Array.from(state.wsServer.clients).filter(client => 
-                            client.readyState === WebSocket.OPEN
-                        );
+                        const activeClients = getOpenClients();
 
                         if (activeClients.length === 0) {
                             state.browserConnected = false;
@@ -239,21 +386,12 @@ function startWsServer() {
                             }
                         } else {
                             logger.info('Other clients still connected (or reconnected). Not showing disconnect dialog.');
-                            // If we have active clients, make sure GUI reflects the status of the active one
-                            // We can take the status of the first active client
                             const activeClient = activeClients[0];
                             if (activeClient.pageStatus) {
-                                // Re-apply status to GUI
-                                if (activeClient.pageStatus === 'connected') {
-                                    gui.updateExtensionStatus(gui.ExtensionStatus.CONNECTED);
-                                } else if (activeClient.pageStatus === 'login_needed') {
-                                    gui.updateExtensionStatus(gui.ExtensionStatus.LOGIN_NEEDED);
-                                } else if (activeClient.pageStatus === 'other_page') {
-                                    gui.updateExtensionStatus(gui.ExtensionStatus.OTHER_PAGE);
-                                }
+                                applyExtensionStatus(activeClient.pageStatus);
                             }
                         }
-                    }, 2000); // 2 seconds grace period
+                    }, 2000);
                 });
             });
 
@@ -319,11 +457,6 @@ function startCloudflared() {
 async function getTunnelUrl() {
     try {
         const response = await axios.get(CONFIG.metricsUrl);
-        // The response format for /quicktunnel usually contains the hostname
-        // Example response: {"hostname":"https://bree-pack-fluid-waiting.trycloudflare.com"}
-        // Or sometimes just text or different JSON depending on version. 
-        // Assuming JSON based on standard cloudflared metrics.
-        // Actually, quicktunnel endpoint usually returns JSON like {"hostname":"..."}
         if (response.data && response.data.hostname) {
             return response.data.hostname;
         }
@@ -351,7 +484,7 @@ async function checkTunnelHealth() {
         logger.info(`Tunnel URL changed: ${state.currentTunnelUrl} -> ${tunnelUrl}`);
         state.currentTunnelUrl = tunnelUrl;
         notifyExtension();
-        gui.updateTunnelConfigStatus(STORE.usingTunnelUrl, state.currentTunnelUrl);
+        gui.updateTunnelConfigStatus(PERSISTENT_STATE.usingTunnelUrl, state.currentTunnelUrl);
     }
 
     // Check if the tunnel is actually reachable
@@ -402,11 +535,11 @@ async function checkPublicIp() {
             logger.info(`Public IP changed: ${state.currentIp} -> ${ip}`);
             state.currentIp = ip;
             notifyExtension();
-            gui.updateIpConfigStatus(STORE.usingIp, state.currentIp);
+            gui.updateIpConfigStatus(PERSISTENT_STATE.usingIp, state.currentIp);
         } else if (!state.currentIp) {
             state.currentIp = ip;
             logger.info(`Initial Public IP: ${ip}`);
-            gui.updateIpConfigStatus(STORE.usingIp, state.currentIp);
+            gui.updateIpConfigStatus(PERSISTENT_STATE.usingIp, state.currentIp);
         }
     } catch (error) {
         logger.error(`Failed to check public IP: ${error.message}`);
@@ -417,17 +550,10 @@ async function checkPublicIp() {
 
 function notifyExtension() {
     if (!state.wsServer) return;
-    
-    const message = JSON.stringify({
+    sendToClients({
         type: 'update',
         ip: state.currentIp,
         tunnelUrl: state.currentTunnelUrl
-    });
-
-    state.wsServer.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(message);
-        }
     });
 
     checkConfigMismatch();
@@ -436,31 +562,14 @@ function notifyExtension() {
 function checkConfigMismatch() {
     if (!state.wsServer) return;
 
-    if (state.currentIp && state.currentIp !== STORE.usingIp) {
-        logger.info(`IP mismatch detected: STORE=${STORE.usingIp}, CURRENT=${state.currentIp}. Sending configure_ip.`);
-        const message = JSON.stringify({
-            type: 'configure_ip',
-            ip: state.currentIp
-        });
-        state.wsServer.clients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN && client.pageStatus === 'connected') {
-                client.send(message);
-            }
-        });
+    if (state.currentIp && state.currentIp !== PERSISTENT_STATE.usingIp) {
+        logger.info(`IP mismatch detected: STORE=${PERSISTENT_STATE.usingIp}, CURRENT=${state.currentIp}. Sending configure_ip.`);
+        sendConfigureIp(state.currentIp);
     }
 
-    if (state.currentTunnelUrl && state.currentTunnelUrl !== STORE.usingTunnelUrl) {
-        logger.info(`Tunnel URL mismatch detected: STORE=${STORE.usingTunnelUrl}, CURRENT=${state.currentTunnelUrl}. Sending configure_tunnel.`);
-        const message = JSON.stringify({
-            type: 'configure_tunnel',
-            tunnelDomain: state.currentTunnelUrl,
-            fullUrl: `https://${state.currentTunnelUrl}${CONFIG.wxApiUrl}`
-        });
-        state.wsServer.clients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN && client.pageStatus === 'connected') {
-                client.send(message);
-            }
-        });
+    if (state.currentTunnelUrl && state.currentTunnelUrl !== PERSISTENT_STATE.usingTunnelUrl) {
+        logger.info(`Tunnel URL mismatch detected: STORE=${PERSISTENT_STATE.usingTunnelUrl}, CURRENT=${state.currentTunnelUrl}. Sending configure_tunnel.`);
+        sendConfigureTunnel(state.currentTunnelUrl);
     }
 }
 
@@ -488,11 +597,23 @@ async function main() {
     if (!STORE.wxAppId) {
         logger.error('wxAppId is not configured.');
         const action = await gui.showMissingWxAppIdDialog();
-        if (action === 'open' || action === 'unavailable') {
-            await open(STORE_DIR);
+        const shouldOpenConfigDir = action === 'open' || action === 'unavailable';
+        if (shouldOpenConfigDir) {
+            try {
+                fs.mkdirSync(STORE_DIR, { recursive: true });
+                if (!fs.existsSync(CONFIG_FILE)) {
+                    fs.writeFileSync(CONFIG_FILE, JSON.stringify(STORE_DEFAULTS, null, 2), 'utf8');
+                }
+                await openConfigDirectory(STORE_DIR);
+                await new Promise((resolve) => setTimeout(resolve, 200));
+            } catch (e) {
+                logger.error(`Failed to open config directory: ${e.message}`);
+            }
         }
-        process.exit(1);
+        gui.closeGui();
+        process.exitCode = shouldOpenConfigDir ? 0 : 1;
         return;
+        
     }
 
     // Initialize GUI
@@ -504,30 +625,13 @@ async function main() {
         onIpConfigClick: () => {
             logger.info('User requested IP config via tray.');
             if (state.currentIp) {
-                const message = JSON.stringify({
-                    type: 'configure_ip',
-                    ip: state.currentIp
-                });
-                state.wsServer.clients.forEach(client => {
-                    if (client.readyState === WebSocket.OPEN && client.pageStatus === 'connected') {
-                        client.send(message);
-                    }
-                });
+                sendConfigureIp(state.currentIp);
             }
         },
         onTunnelConfigClick: () => {
             logger.info('User requested Tunnel config via tray.');
             if (state.currentTunnelUrl) {
-                const message = JSON.stringify({
-                    type: 'configure_tunnel',
-                    tunnelDomain: state.currentTunnelUrl,
-                    fullUrl: `https://${state.currentTunnelUrl}${CONFIG.wxApiUrl}`
-                });
-                state.wsServer.clients.forEach(client => {
-                    if (client.readyState === WebSocket.OPEN && client.pageStatus === 'connected') {
-                        client.send(message);
-                    }
-                });
+                sendConfigureTunnel(state.currentTunnelUrl);
             }
         },
         onRestartCloudflaredClick: () => {
@@ -598,5 +702,6 @@ async function main() {
 
 main().catch(err => {
     logger.error('Fatal error:', err);
-    process.exit(1);
+    gui.closeGui();
+    process.exitCode = 1;
 });

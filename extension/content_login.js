@@ -4,40 +4,100 @@ const WS_URL = 'ws://127.0.0.1:18790';
 let ws;
 let retryInterval = 5000;
 let isConnecting = false;
-let lastCaptureAt = 0;
+let lastQrcodeSentAt = 0;
+let lastReloadAt = 0;
+let captureRetryTimer = null;
+let reloadCheckTimer = null;
 
-function sendLoginScreenshot() {
+function sendTextNotify(content) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'text_notify',
+            text: content
+        }));
+    }
+}
+
+function getIframeDocument() {
+    const iframe = document.querySelector('#wx_reg > iframe');
+    return iframe ? (iframe.contentDocument || iframe.contentWindow.document) : null;
+}
+
+function checkQrcodeAndCapture() {
     const now = Date.now();
-    if (now - lastCaptureAt < 60000) return;
-    const target = document.querySelector('.login_wechat');
-    if (!target) return;
-    const rect = target.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
-    lastCaptureAt = now;
-    chrome.runtime.sendMessage({
-        type: 'capture_login_wechat',
-        rect: {
-            left: rect.left,
-            top: rect.top,
-            width: rect.width,
-            height: rect.height
-        },
-        dpr: window.devicePixelRatio || 1
-    }, (resp) => {
-        if (chrome.runtime.lastError) {
-            console.error('Capture message failed:', chrome.runtime.lastError.message);
-            return;
+    // Throttle: only check/send every 60s unless reset
+    // if (now - lastQrcodeSentAt < 60000) return;
+
+    // let img = document.querySelector('.qrcode_login_img.js_qrcode_img');
+    // if (!img) {
+    //     const doc = getIframeDocument();
+    //     if (doc) img = doc.querySelector('.qrcode_login_img.js_qrcode_img');
+    // }
+    const doc = getIframeDocument();
+    if (doc) img = doc.querySelector('.qrcode_login_img.js_qrcode_img');
+
+    if (img && img.src && !img.src.includes('login_qrcode')) { // Ensure src is not empty or just a placeholder
+        // Found valid QR code, send src
+        console.warn('checkQrcodeAndCapture: Found valid src', img.src);
+        // const qrcode = img.src.replace('login_qrcode','qrcode')
+        sendLoginQrcode(img.src);
+        // Stop checking once sent (until next explicit trigger or timeout)
+        if (captureRetryTimer) {
+            clearInterval(captureRetryTimer);
+            captureRetryTimer = null;
         }
-        if (!resp || !resp.ok || !resp.base64) {
-            return;
+    } else {
+        // Keep checking
+        if (!captureRetryTimer) {
+            captureRetryTimer = setInterval(checkQrcodeAndCapture, 1000);
         }
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-                type: 'login_screenshot',
-                base64: resp.base64
-            }));
-        }
-    });
+    }
+}
+
+function checkReload() {
+    const now = Date.now();
+    // Prevent spamming reload: at most once every 5 seconds
+    if (now - lastReloadAt < 5000) return;
+
+    let reloadLink = document.querySelector('.qrcode_login_reload');
+    if (!reloadLink) {
+        const doc = getIframeDocument();
+        if (doc) reloadLink = doc.querySelector('.qrcode_login_reload');
+    }
+
+    if (reloadLink && reloadLink.offsetParent !== null) { // Visible
+        console.log('QR code expired, clicking reload...');
+        lastReloadAt = now;
+        
+        // Use script injection to bypass CSP for javascript: links or inline handlers
+        // Must use src attribute with web_accessible_resources to bypass inline script CSP
+        const script = document.createElement('script');
+        script.src = chrome.runtime.getURL('inject_click.js');
+        script.onload = function() {
+            this.remove();
+        };
+        (document.head || document.documentElement).appendChild(script);
+
+        sendTextNotify('二维码已过期，正在刷新...');
+        
+        // After reload, start checking for QR code again immediately
+        lastQrcodeSentAt = 0; // Reset timer to allow immediate send
+        if (captureRetryTimer) clearInterval(captureRetryTimer);
+        captureRetryTimer = setInterval(checkQrcodeAndCapture, 1000);
+    }
+}
+
+function sendLoginQrcode(src) {
+    const now = Date.now();
+    if (now - lastQrcodeSentAt < 60000) return;
+    
+    lastQrcodeSentAt = now;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'login_qrcode_url',
+            url: src
+        }));
+    }
 }
 
 function connect() {
@@ -59,7 +119,15 @@ function connect() {
         
         // Report login_needed status
         ws.send(JSON.stringify({ type: 'status', status: 'login_needed', url: window.location.href }));
-        sendLoginScreenshot();
+        
+        sendTextNotify('检测到未登录状态，请注意：管理后台登出或网络变动可能导致连接断开。');
+        
+        checkQrcodeAndCapture();
+        
+        // Start reload checker
+        // if (!reloadCheckTimer) {
+        //     reloadCheckTimer = setInterval(checkReload, 2000);
+        // }
 
         // Heartbeat
         setInterval(() => {
@@ -99,7 +167,7 @@ document.addEventListener('visibilitychange', () => {
         ws.send(JSON.stringify({ type: 'status', status: 'background' }));
     } else {
         ws.send(JSON.stringify({ type: 'status', status: 'login_needed', url: window.location.href }));
-        sendLoginScreenshot();
+        checkQrcodeAndCapture();
     }
 });
 

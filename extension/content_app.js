@@ -2,12 +2,25 @@ console.log('WxClaw Helper App Script Loaded');
 
 const WS_URL = 'ws://127.0.0.1:18790';
 const TARGET_APP_PATH = '/wework_admin/frame#/apps/modApiApp';
+const CONFIG_REFRESH_KEY = 'wxclaw_config_refresh_at';
+const CONFIG_REFRESH_WINDOW_MS = 120000;
 let ws;
 let retryInterval = 5000;
 let isConnecting = false;
 
 function isAppUrl(url) {
     return url.includes(TARGET_APP_PATH);
+}
+
+function refreshBeforeConfigure() {
+    const now = Date.now();
+    const lastRefreshAt = Number(sessionStorage.getItem(CONFIG_REFRESH_KEY) || '0');
+    if (now - lastRefreshAt < CONFIG_REFRESH_WINDOW_MS) {
+        return false;
+    }
+    sessionStorage.setItem(CONFIG_REFRESH_KEY, String(now));
+    window.location.reload();
+    return true;
 }
 
 function connect() {
@@ -53,9 +66,11 @@ function connect() {
                 executeCustomScript(ip, tunnelUrl);
             } else if (message.type === 'configure_ip') {
                 console.log('Received configure_ip command', message.ip);
+                if (refreshBeforeConfigure()) return;
                 await configureIp(message.ip);
             } else if (message.type === 'configure_tunnel') {
                 console.log('Received configure_tunnel command', message.fullUrl);
+                if (refreshBeforeConfigure()) return;
                 await configureTunnel(message.fullUrl, message.tunnelDomain);
             }
         } catch (e) {
@@ -164,8 +179,8 @@ const CONFIG_SELECTORS = {
         editBtn: '.apiApp_callback_showCnt_linkGroup_edit.js_callback_edit_btn',
         urlInput: '.apiApp_callback_configSection_urlInput',
         saveBtn: '.js_save_callback',
-        cancelBtn:'.qui_btn.js_back_btn',
-        closeBtn: '.js_back_btnlback'
+        // cancelBtn:'.qui_btn.ww_btn.js_back_btn',
+        closeBtn: '.ww_btn_Back' 
     }
 };
 
@@ -317,14 +332,6 @@ async function configureTunnel(fullUrl, tunnelDomain) {
 
         if (errorMessage) {
             console.warn('Configuration rejected by server:', errorMessage);
-            // Click cancel to exit edit mode
-            const cancelBtn = document.querySelector(CONFIG_SELECTORS.tunnel.cancelBtn);
-            if (cancelBtn) {
-                 console.log('Clicking Cancel Button due to error');
-                 safeClick(cancelBtn);
-            }
-            
-            // Notify daemon about the error
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ 
                     type: 'config_error', 
@@ -335,11 +342,7 @@ async function configureTunnel(fullUrl, tunnelDomain) {
             
             throw new Error(`Server Rejected: ${errorMessage}`);
         } else if (!success) {
-             // Timeout
              console.warn('Configuration timeout or unknown state');
-             // Try to cleanup
-             const cancelBtn = document.querySelector(CONFIG_SELECTORS.tunnel.closeBtn);
-             if (cancelBtn) safeClick(cancelBtn);
              
              if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ 

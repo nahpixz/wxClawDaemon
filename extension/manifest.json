@@ -35,5 +35,15 @@
   ],
   "action": {
     "default_title": "WxClaw Helper"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "inject_click.js"
+      ],
+      "matches": [
+        "*://work.weixin.qq.com/*"
+      ]
+    }
+  ]
 }
