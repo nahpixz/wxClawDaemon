@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "WxClaw Helper",
+  "version": "1.0",
+  "description": "Helper extension for WxClaw Daemon",
+  "permissions": [
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "*://work.weixin.qq.com/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "*://work.weixin.qq.com/wework_admin/loginpage_wx*"
+      ],
+      "js": [
+        "content_login.js"
+      ]
+    },
+    {
+      "matches": [
+        "*://work.weixin.qq.com/wework_admin/frame*"
+      ],
+      "js": [
+        "content_app.js"
+      ]
+    }
+  ],
+  "action": {
+    "default_title": "WxClaw Helper"
+  }
+}
